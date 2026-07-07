@@ -152,19 +152,75 @@ def resize_for_ocr(image, scale):
     return image.resize((max(1, width * scale), max(1, height * scale)))
 
 
-def create_ocr_variants(image):
-    grayscale = ImageOps.grayscale(image)
-    enhanced = ImageOps.autocontrast(grayscale)
-    large = resize_for_ocr(enhanced, 4).filter(ImageFilter.SHARPEN)
-    inverted = ImageOps.invert(large)
-    binary = resize_for_ocr(enhanced, 5).point(lambda value: 255 if value > 145 else 0)
+def crop_red_annotation_border(image):
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    pixels = rgb.get_flattened_data() if hasattr(rgb, "get_flattened_data") else rgb.getdata()
 
-    return [
-        prepare_ocr_image(image),
-        large,
-        inverted,
-        binary,
-    ]
+    min_x = width
+    min_y = height
+    max_x = -1
+    max_y = -1
+    red_count = 0
+    for index, (red, green, blue) in enumerate(pixels):
+        if red >= 200 and green <= 90 and blue <= 90 and red - green >= 90 and red - blue >= 90:
+            x = index % width
+            y = index // width
+            red_count += 1
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+
+    if red_count < width * height * 0.04:
+        return None
+
+    reaches_edges = (
+        min_x <= width * 0.08
+        and min_y <= height * 0.12
+        and max_x >= width * 0.90
+        and max_y >= height * 0.75
+    )
+    if not reaches_edges:
+        return None
+
+    inset = max(6, min(width, height) // 25)
+    crop_box = (
+        max(0, min_x + inset),
+        max(0, min_y + inset),
+        min(width, max_x - inset),
+        min(height, max_y - inset),
+    )
+    if crop_box[2] - crop_box[0] < MIN_CAPTURE_SIZE or crop_box[3] - crop_box[1] < MIN_CAPTURE_SIZE:
+        return None
+
+    return image.crop(crop_box)
+
+
+def create_ocr_variants(image):
+    images = [image]
+    red_border_crop = crop_red_annotation_border(image)
+    if red_border_crop is not None:
+        images.insert(0, red_border_crop)
+
+    variants = []
+    for source in images:
+        grayscale = ImageOps.grayscale(source)
+        enhanced = ImageOps.autocontrast(grayscale)
+        large = resize_for_ocr(enhanced, 4).filter(ImageFilter.SHARPEN)
+        inverted = ImageOps.invert(large)
+        binary = resize_for_ocr(enhanced, 5).point(lambda value: 255 if value > 145 else 0)
+
+        variants.extend(
+            [
+                prepare_ocr_image(source),
+                large,
+                inverted,
+                binary,
+            ]
+        )
+
+    return variants
 
 
 def normalize_ocr_text(text):
@@ -195,6 +251,7 @@ def clean_ocr_candidate(text):
 
             line = re.sub(r"^[^\w\u4e00-\u9fff]+", "", line).strip()
             line = re.sub(r"^[\u4e00-\u9fff]\s*(?=[A-Za-z])", "", line).strip()
+            line = re.sub(r"^[A-Z](?=[A-Z][a-z]{2,})", "", line).strip()
         elif len(line) <= 3 and len(set(line)) <= 1:
             continue
 

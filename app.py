@@ -40,6 +40,7 @@ COMMON_TESSERACT_PATHS = [
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
 ]
+USER_TESSDATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Tesseract-OCR", "tessdata")
 
 
 LANGUAGE_CHOICES = {
@@ -79,6 +80,7 @@ def find_tesseract_command():
 
 
 def get_tesseract_languages(command):
+    configure_tessdata_prefix(command)
     result = subprocess.run(
         [command, "--list-langs"],
         capture_output=True,
@@ -95,6 +97,17 @@ def get_tesseract_languages(command):
         if value and not value.lower().startswith("list of available languages"):
             languages.add(value)
     return languages
+
+
+def configure_tessdata_prefix(command):
+    if os.path.isdir(USER_TESSDATA_DIR):
+        os.environ["TESSDATA_PREFIX"] = USER_TESSDATA_DIR
+        return
+
+    install_dir = os.path.dirname(command)
+    install_tessdata = os.path.join(install_dir, "tessdata")
+    if os.path.isdir(install_tessdata):
+        os.environ.setdefault("TESSDATA_PREFIX", install_tessdata)
 
 
 def ensure_ocr_ready():

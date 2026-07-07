@@ -147,19 +147,113 @@ def prepare_ocr_image(image):
     return scaled.filter(ImageFilter.SHARPEN)
 
 
+def resize_for_ocr(image, scale):
+    width, height = image.size
+    return image.resize((max(1, width * scale), max(1, height * scale)))
+
+
+def create_ocr_variants(image):
+    grayscale = ImageOps.grayscale(image)
+    enhanced = ImageOps.autocontrast(grayscale)
+    large = resize_for_ocr(enhanced, 4).filter(ImageFilter.SHARPEN)
+    inverted = ImageOps.invert(large)
+    binary = resize_for_ocr(enhanced, 5).point(lambda value: 255 if value > 145 else 0)
+
+    return [
+        prepare_ocr_image(image),
+        large,
+        inverted,
+        binary,
+    ]
+
+
 def normalize_ocr_text(text):
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
 
 
-def ocr_image_text(image):
-    ensure_ocr_ready()
-    processed = prepare_ocr_image(image)
-    text = pytesseract.image_to_string(processed, lang=OCR_LANGUAGE, config="--psm 6")
+def clean_ocr_candidate(text):
     normalized = normalize_ocr_text(text)
     if not normalized:
+        return ""
+
+    has_latin = bool(re.search(r"[A-Za-z]", normalized))
+    if not has_latin:
+        return normalized
+
+    cleaned_lines = []
+    for line in normalized.splitlines():
+        line = re.sub(r"[\u0400-\u052f]+", " ", line).strip()
+        if not line:
+            continue
+
+        if re.search(r"[A-Za-z]", line):
+            first_latin = re.search(r"[A-Za-z]", line)
+            prefix = line[: first_latin.start()]
+            if not re.search(r"[\u4e00-\u9fff]{2,}", prefix):
+                line = line[first_latin.start() :]
+
+            line = re.sub(r"^[^\w\u4e00-\u9fff]+", "", line).strip()
+            line = re.sub(r"^[\u4e00-\u9fff]\s*(?=[A-Za-z])", "", line).strip()
+        elif len(line) <= 3 and len(set(line)) <= 1:
+            continue
+
+        if re.search(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", line):
+            cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def score_ocr_candidate(text):
+    if not text:
+        return -1_000
+
+    latin = len(re.findall(r"[A-Za-z]", text))
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    kana = len(re.findall(r"[\u3040-\u30ff]", text))
+    hangul = len(re.findall(r"[\uac00-\ud7af]", text))
+    digits = len(re.findall(r"\d", text))
+    useful = latin + cjk + kana + hangul + digits
+    noise = len(re.findall(r"[^A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\s.,:;!?()\\/\-+_%#@&=]", text))
+    cyrillic = len(re.findall(r"[\u0400-\u052f]", text))
+
+    score = useful * 3 - noise * 4 - cyrillic * 6
+    if latin >= 3:
+        score += 8
+    if useful < 2:
+        score -= 12
+    return score
+
+
+def ocr_image_text(image):
+    ensure_ocr_ready()
+
+    candidates = {}
+    languages = [OCR_LANGUAGE, "eng"]
+    page_modes = [7, 6, 11]
+    for variant in create_ocr_variants(image):
+        for language in languages:
+            for page_mode in page_modes:
+                config = f"--oem 1 --psm {page_mode} -c preserve_interword_spaces=1"
+                try:
+                    text = pytesseract.image_to_string(variant, lang=language, config=config)
+                except Exception:
+                    continue
+
+                cleaned = clean_ocr_candidate(text)
+                if cleaned:
+                    score, count = candidates.get(cleaned, (-1_000, 0))
+                    candidates[cleaned] = (max(score, score_ocr_candidate(cleaned)), count + 1)
+
+    if not candidates:
         raise RuntimeError("没有识别到文字，请重新框选更清晰的区域。")
-    return normalized
+
+    def rank_candidate(item):
+        text, (score, count) = item
+        line_penalty = (text.count("\n")) * 3
+        return score + count * 4 - line_penalty, count, -len(text)
+
+    return max(candidates.items(), key=rank_candidate)[0]
 
 
 def guess_source_language(text):

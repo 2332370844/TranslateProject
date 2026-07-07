@@ -1,0 +1,7 @@
+__pycache__/
+.codegraph/
+*.py[cod]
+.venv/
+dist/
+build/
+*.spec
